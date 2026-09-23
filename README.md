@@ -113,7 +113,7 @@ Install dependencies into a virtual environment:
 
 ```bash
 sudo apt update
-sudo apt install -y python3-venv python3-dev build-essential
+sudo apt install -y python3-venv python3-dev python3-setuptools build-essential swig
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
@@ -121,6 +121,13 @@ pip install -r requirements.txt
 
 (Run `source venv/bin/activate` again in every new terminal before
 running `app.py`.)
+
+> `requirements.txt` uses `rpi-lgpio` instead of the old `RPi.GPIO`.
+> It provides the same `import RPi.GPIO` API but also works on Raspberry
+> Pi 5 and current Raspberry Pi OS. The old `RPi.GPIO` fails there with
+> `RuntimeError: Cannot determine SOC peripheral base address`. If you
+> installed `RPi.GPIO` earlier, remove it first (the two conflict):
+> `pip uninstall -y RPi.GPIO` then `pip install -r requirements.txt`.
 
 If you're using the Raspberry Pi Camera Module (not a USB webcam), enable
 the V4L2 compatibility layer so `cv2.VideoCapture(0)` can see it:
