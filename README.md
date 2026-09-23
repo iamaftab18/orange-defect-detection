@@ -81,7 +81,7 @@ Broker: `broker.hivemq.com`, port `1883` (plain MQTT, no login needed).
 | Signal | GPIO (BCM) |
 |---|---|
 | Rotation motor relay IN | 27 |
-| Camera | USB webcam / Pi camera via `/dev/video0` |
+| Camera | USB webcam (`/dev/video0`) |
 
 **Power notes:**
 - Drive the conveyor/rotation motors through the relays, not directly
@@ -129,12 +129,8 @@ running `app.py`.)
 > installed `RPi.GPIO` earlier, remove it first (the two conflict):
 > `pip uninstall -y RPi.GPIO` then `pip install -r requirements.txt`.
 
-If you're using the Raspberry Pi Camera Module (not a USB webcam), enable
-the V4L2 compatibility layer so `cv2.VideoCapture(0)` can see it:
-
-```bash
-sudo modprobe bcm2835-v4l2
-```
+Plug in the USB webcam before starting. This app uses a USB webcam only
+(the Pi Camera Module is not supported by `cv2.VideoCapture`).
 
 Run it:
 
@@ -188,6 +184,8 @@ In `app.py`:
 - **Load cell reads negative/unstable**: re-run `scale.tare()` with the
   platform empty, and confirm `LOADCELL_CALIBRATION_FACTOR` is correct
   for your specific cell.
-- **Camera not found on the Pi**: confirm `ls /dev/video0` exists; for
-  the Pi Camera Module make sure `bcm2835-v4l2` is loaded (see setup
-  above), or change `CAMERA_INDEX` in `app.py`.
+- **Camera not found on the Pi** (`Could not open camera index 0`): run
+  `ls /dev/video*` with the webcam plugged in. If the webcam is not
+  `/dev/video0` (a Pi 5 lists extra internal video devices), set
+  `CAMERA_INDEX` in `app.py` to its number. `v4l2-ctl --list-devices`
+  (from `sudo apt install v4l-utils`) shows which device is the webcam.

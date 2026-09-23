@@ -40,7 +40,7 @@ ROTATE_SECONDS = 3
 # How many camera frames to sample while the orange is rotating
 FRAME_SAMPLES = 6
 
-# Camera device index (0 = default USB webcam / Pi camera via V4L2)
+# USB webcam device index (0 = /dev/video0). Check `ls /dev/video*`.
 CAMERA_INDEX = 0
 
 # --- Defect detection tuning ---
@@ -94,6 +94,13 @@ def frame_has_black_patch(frame):
     return largest_area > BLACK_AREA_THRESHOLD
 
 
+def read_fresh_frame():
+    """Drop buffered (stale) frames so we analyse what the camera sees now."""
+    for _ in range(4):
+        camera.grab()
+    return camera.read()
+
+
 def rotate_and_inspect():
     """Spin the platform motor and sample frames for black defect patches."""
     defected = False
@@ -101,7 +108,7 @@ def rotate_and_inspect():
 
     motor_on()
     for _ in range(FRAME_SAMPLES):
-        ok, frame = camera.read()
+        ok, frame = read_fresh_frame()
         if ok and frame_has_black_patch(frame):
             defected = True
         time.sleep(interval)
@@ -146,6 +153,18 @@ def on_message(client, userdata, msg):
 # ------------------------------------------------------------------
 
 def main():
+    if not camera.isOpened():
+        motor_off()
+        GPIO.cleanup()
+        raise SystemExit(
+            f"Could not open camera index {CAMERA_INDEX}. "
+            "Check `ls /dev/video*` and set CAMERA_INDEX in app.py."
+        )
+
+    # Let the USB camera's auto-exposure settle; first frames are often dark.
+    for _ in range(10):
+        camera.read()
+
     client = mqtt.Client(client_id=MQTT_CLIENT_ID)
     client.on_connect = on_connect
     client.on_message = on_message
