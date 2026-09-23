@@ -25,7 +25,8 @@ Files in this project:
    `OBJECT_DETECTED` on MQTT topic `orangesort/detect`.
 2. The Raspberry Pi receives that message, turns on the **rotation motor
    relay** for `ROTATE_SECONDS` (default 3 s, one full rotation), and
-   samples camera frames while it spins.
+   samples camera frames while it spins. A live window shows the camera
+   through several filters the whole time (see "Live video window").
 3. Each frame is converted to HSV and checked for a big patch of black
    pixels (rot/mold typically looks like a large dark/black blotch). If
    any sampled frame has a black patch bigger than `BLACK_AREA_THRESHOLD`,
@@ -143,14 +144,51 @@ the virtual environment.)
 Plug in the USB webcam before starting. This app uses a USB webcam only
 (the Pi Camera Module is not supported by `cv2.VideoCapture`).
 
-Run it:
+`requirements.txt` installs `opencv-python` (the build with window
+support). If you installed `opencv-python-headless` earlier, remove it
+first, because it cannot open windows:
 
 ```bash
-python3 app.py
+deactivate 2>/dev/null
+python3 -m pip uninstall -y opencv-python-headless --break-system-packages
+source venv/bin/activate
+pip install -r requirements.txt
 ```
 
-It will connect to HiveMQ, subscribe to `orangesort/detect`, and print
-status as oranges are processed. Leave it running — it loops forever.
+Run it **from the Pi's own desktop terminal (or VNC)** so the video
+window has a screen to appear on:
+
+```bash
+python app.py
+```
+
+It will connect to HiveMQ, subscribe to `orangesort/detect`, open the
+live video window, and print status as oranges are processed. Leave it
+running — it loops forever. Press `q` in the video window (or `Ctrl+C`
+in the terminal) to quit.
+
+## Live video window
+
+The window is a 3 × 2 grid, updated live from the USB webcam:
+
+| Tile | What it shows |
+|---|---|
+| Original | Raw camera image |
+| Grayscale | Camera image converted to gray |
+| HSV | Camera image converted to the HSV color space |
+| Orange filter | Only the orange-colored pixels (`ORANGE_HSV_LOWER/UPPER`) |
+| Black filter | White where pixels are black (`V < BLACK_VALUE_THRESHOLD`) |
+| Detection | Original with red outlines around black patches bigger than `BLACK_AREA_THRESHOLD`, plus the current status |
+
+The status line at the bottom of the Detection tile is `WAITING FOR
+ORANGE`, `INSPECTING x.x/3s` while the motor is rotating, then `RESULT:
+DEFECTED` / `RESULT: NORMAL` for `RESULT_HOLD_SECONDS`. The window is
+also handy for tuning: watch the Black filter and Detection tiles while
+you adjust the thresholds.
+
+Set `SHOW_VIDEO = False` in `app.py` to run without the window. If no
+screen is available (for example over plain SSH), the window is turned
+off automatically and the app keeps working.
 
 ### 2. ESP32 (`esp32_code.ino`)
 
@@ -195,6 +233,12 @@ In `app.py`:
 - **Load cell reads negative/unstable**: re-run `scale.tare()` with the
   platform empty, and confirm `LOADCELL_CALIBRATION_FACTOR` is correct
   for your specific cell.
+- **No video window appears** — check the message printed at startup:
+  `No display found (running over SSH?)` means the app was started
+  without a screen (run it from the Pi desktop or VNC).
+  `This OpenCV build has no window support` means
+  `opencv-python-headless` is installed (see the Setup section to
+  replace it with `opencv-python`).
 - **Camera not found on the Pi** (`Could not open camera index 0`): run
   `ls /dev/video*` with the webcam plugged in. If the webcam is not
   `/dev/video0` (a Pi 5 lists extra internal video devices), set
