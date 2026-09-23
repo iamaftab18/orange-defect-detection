@@ -21,8 +21,9 @@ Files in this project:
 ## How it works
 
 1. Orange is placed on the platform. The ESP32's load cell (HX711) detects
-   weight above `WEIGHT_PRESENT_THRESHOLD_G` (default 5 g) and publishes
-   `OBJECT_DETECTED` on MQTT topic `orangesort/detect`.
+   weight above `WEIGHT_PRESENT_THRESHOLD_G` (default 5 g), waits until
+   the reading stops changing (so a half-placed orange isn't weighed),
+   and publishes `OBJECT_DETECTED` on MQTT topic `orangesort/detect`.
 2. The Raspberry Pi receives that message, turns on the **rotation motor
    relay** for `ROTATE_SECONDS` (default 3 s, one full rotation), and
    samples camera frames while it spins. A live window shows the camera
@@ -93,6 +94,11 @@ Broker: `broker.hivemq.com`, port `1883` (plain MQTT, no login needed).
   and `RELAY_ACTIVE_HIGH = False` in `app.py`.
 - Power servos from a 5V supply capable of a few hundred mA each, not
   directly from the ESP32 3V3/5V pin if you have more than one under load.
+- For a steady weight reading: power the HX711 from the ESP32 **3V3** pin
+  (not a separate supply), add a 100 µF + 100 nF capacitor across the
+  HX711 VCC/GND, keep the load cell wires short and away from the motor
+  and relay wires, and make sure the platform only touches the load cell
+  (nothing rubbing on the frame).
 
 ## Setup
 
@@ -203,11 +209,39 @@ off automatically and the app keeps working.
    - Password: `1122334455`
    (edit `WIFI_SSID` / `WIFI_PASSWORD` at the top of the file if these
    change).
-4. **Calibrate the load cell**: the default `LOADCELL_CALIBRATION_FACTOR`
-   (2280.0) is a placeholder. Run a basic HX711 calibration sketch with a
-   known weight first, then update the constant in `esp32_code.ino`.
-5. Upload to the ESP32 and open the Serial Monitor at `115200` baud to
-   watch WiFi/MQTT connection and weight readings.
+4. Upload to the ESP32 and open the Serial Monitor at `115200` baud
+   with the line ending set to **Newline**. You will see the WiFi/MQTT
+   connection, then `Weight: x.x g` once a second.
+5. **Calibrate the load cell** (see below). This is needed once.
+
+#### Calibrating the load cell
+
+The built-in default calibration factor is only a placeholder, so the
+weight will be wrong until you calibrate. You need one object of known
+weight (for example a 100 g or 200 g calibration weight, or anything you
+have weighed on a kitchen scale).
+
+1. Type `cal` in the Serial Monitor and press Enter.
+2. Follow the prompts:
+   1. Remove everything from the platform, press Enter. The scale zeroes.
+   2. Put the known weight on the platform, wait a few seconds, type its
+      weight in grams (for example `100`) and press Enter.
+   3. The ESP32 prints the calculated factor, saves it in flash (it
+      survives power-off), and shows a check reading. Remove the weight
+      and press Enter.
+3. The empty platform should now read about `0.0 g`, and the known
+   weight should read correctly.
+
+Other things to know:
+
+- The scale is zeroed automatically at every start-up, after WiFi/MQTT
+  is connected, and again after each orange leaves the platform. Keep the
+  platform empty while the ESP32 boots. Type `tare` to zero it manually.
+- Calibration is normally done once. Repeat it if you change the load
+  cell, the platform, or the HX711 wiring.
+- If the empty platform still drifts or jumps by tens of grams, that is
+  a wiring/power/mechanical problem, not a calibration problem. See the
+  troubleshooting section.
 
 ## Tuning defect detection
 
@@ -230,9 +264,19 @@ In `app.py`:
 - **MQTT messages not arriving**: `broker.hivemq.com` is a shared public
   broker — if it's unreachable or slow, try again after a minute, or
   point both `app.py` and `esp32_code.ino` at another broker/port.
-- **Load cell reads negative/unstable**: re-run `scale.tare()` with the
-  platform empty, and confirm `LOADCELL_CALIBRATION_FACTOR` is correct
-  for your specific cell.
+- **Weight shows tens or hundreds of grams with nothing on the platform**:
+  1. Keep the platform empty while the ESP32 boots, then type `tare`.
+  2. Run `cal` (the placeholder factor is wrong for most load cells).
+  3. If it still wanders, check the hardware: HX711 VCC on the ESP32
+     **3V3** pin with a 100 µF + 100 nF capacitor, short wires away from
+     motors/relays, all four load cell wires firmly connected, and the
+     platform not touching the frame (a rubbing platform or a loose
+     mounting screw gives a changing offset). Also confirm the load cell
+     arrow / mounting direction matches the direction of the load.
+- **Weight reads negative or the wrong way round**: the calibration
+  handles swapped signal wires automatically, so run `cal` again.
+- **`HX711 not found` keeps printing**: check the DOUT (GPIO 16), SCK
+  (GPIO 4), VCC and GND wires to the HX711 board.
 - **No video window appears** — check the message printed at startup:
   `No display found (running over SSH?)` means the app was started
   without a screen (run it from the Pi desktop or VNC).

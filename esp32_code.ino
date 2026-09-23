@@ -9,6 +9,10 @@
     or servo3 (normal + light), or just the conveyor alone if defected.
   - Runs forever, one orange at a time.
 
+  Serial Monitor (115200 baud) commands:
+    cal   - guided load cell calibration (result is saved in flash)
+    tare  - zero the scale (platform must be empty)
+
   Required libraries (install via Arduino Library Manager):
     - PubSubClient      (by Nick O'Leary)
     - HX711             (by bogde)
@@ -19,6 +23,7 @@
 #include <PubSubClient.h>
 #include <HX711.h>
 #include <ESP32Servo.h>
+#include <Preferences.h>
 
 // ------------------------------------------------------------------
 // WiFi / MQTT configuration
@@ -49,19 +54,23 @@ const int SERVO3_PIN = 21;          // normal + light (<=100g) path
 const bool RELAY_ACTIVE_HIGH = true;  // set false if your relay turns ON on LOW
 
 // ------------------------------------------------------------------
-// Load cell calibration
+// Load cell settings
 // ------------------------------------------------------------------
 
-// TODO: calibrate for your specific load cell + HX711 module.
-const float LOADCELL_CALIBRATION_FACTOR = 2280.0;
+// Only used until you run the "cal" command once; after that the value
+// saved in flash is used instead.
+const float DEFAULT_CALIBRATION_FACTOR = 2280.0;
+
 const float WEIGHT_PRESENT_THRESHOLD_G = 5.0;   // min grams = "object present"
 const float WEIGHT_HEAVY_THRESHOLD_G = 100.0;   // normal heavy vs normal light
+const float WEIGHT_STABLE_TOLERANCE_G = 2.0;    // readings this close = settled
 
 // ------------------------------------------------------------------
 // Globals
 // ------------------------------------------------------------------
 
 HX711 scale;
+Preferences prefs;
 Servo servo1, servo2, servo3;
 
 WiFiClient espClient;
@@ -93,6 +102,9 @@ void mqttDelay(unsigned long ms) {
 void setupWifi() {
   Serial.print("Connecting to WiFi");
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  // WiFi power-saving makes the supply current pulse, which adds noise
+  // to the HX711 reading. Keep the radio awake for a steadier weight.
+  WiFi.setSleep(false);
   while (WiFi.status() != WL_CONNECTED) {
     delay(400);
     Serial.print(".");
@@ -114,6 +126,135 @@ void reconnectMqtt() {
       Serial.println(" retrying in 2s");
       delay(2000);
     }
+  }
+}
+
+// ------------------------------------------------------------------
+// Load cell: calibration, zeroing, stable reading
+// ------------------------------------------------------------------
+
+// Applies the calibration factor saved in flash (or the default).
+void loadCalibration() {
+  prefs.begin("scale", false);
+  float factor = prefs.getFloat("factor", 0.0);
+  prefs.end();
+
+  if (factor != 0.0) {
+    scale.set_scale(factor);
+    Serial.printf("Loaded saved calibration factor: %.2f\n", factor);
+  } else {
+    scale.set_scale(DEFAULT_CALIBRATION_FACTOR);
+    Serial.println("No saved calibration yet, using default. Type 'cal' to calibrate.");
+  }
+}
+
+void saveCalibration(float factor) {
+  prefs.begin("scale", false);
+  prefs.putFloat("factor", factor);
+  prefs.end();
+}
+
+// Waits for a line typed in the Serial Monitor, keeping MQTT alive.
+String readLine() {
+  while (!Serial.available()) {
+    client.loop();
+    delay(20);
+  }
+  String line = Serial.readStringUntil('\n');
+  line.trim();
+  return line;
+}
+
+void calibrate() {
+  Serial.println();
+  Serial.println("=== LOAD CELL CALIBRATION ===");
+  Serial.println("(Serial Monitor line ending must be set to 'Newline')");
+  Serial.println("Step 1: remove everything from the platform, then press Enter.");
+  readLine();
+
+  scale.set_scale(1.0);
+  scale.tare(20);
+  Serial.println("Zero set.");
+
+  Serial.println("Step 2: place a known weight on the platform and wait a few seconds.");
+  Serial.println("        Then type its weight in grams (e.g. 100) and press Enter.");
+  float knownGrams = readLine().toFloat();
+  if (knownGrams <= 0) {
+    Serial.println("Invalid weight, calibration cancelled.");
+    loadCalibration();
+    return;
+  }
+
+  Serial.println("Measuring...");
+  float rawChange = scale.get_value(20);  // change from zero, before scaling
+  if (fabs(rawChange) < 100) {
+    Serial.println("Almost no change detected. Is the weight on the platform and the");
+    Serial.println("load cell wired correctly? Calibration cancelled.");
+    loadCalibration();
+    return;
+  }
+
+  float factor = rawChange / knownGrams;
+  scale.set_scale(factor);
+  saveCalibration(factor);
+  Serial.printf("Calibration factor %.2f saved to flash.\n", factor);
+
+  Serial.println("Check: the weight now reads");
+  for (int i = 0; i < 3; i++) {
+    Serial.printf("  %.1f g\n", scale.get_units(5));
+  }
+
+  Serial.println("Step 3: remove the weight from the platform, then press Enter.");
+  readLine();
+  scale.tare(20);
+  Serial.println("Calibration done. Normal operation resumes.");
+}
+
+// Wait until the reading stops changing (the orange has finished
+// settling on the platform), so we don't record a half-placed weight.
+float readStableWeight() {
+  float previous = scale.get_units(5);
+  for (int i = 0; i < 10; i++) {
+    mqttDelay(300);
+    float current = scale.get_units(5);
+    if (fabs(current - previous) < WEIGHT_STABLE_TOLERANCE_G) {
+      return current;
+    }
+    previous = current;
+  }
+  return previous;
+}
+
+void printWeightPeriodically(float weight) {
+  static unsigned long lastPrint = 0;
+  if (millis() - lastPrint >= 1000) {
+    lastPrint = millis();
+    Serial.printf("Weight: %.1f g\n", weight);
+  }
+}
+
+void handleSerialCommands() {
+  if (!Serial.available()) return;
+
+  String cmd = Serial.readStringUntil('\n');
+  cmd.trim();
+  cmd.toLowerCase();
+  if (cmd.length() == 0) return;
+
+  if (cmd != "cal" && cmd != "tare") {
+    Serial.println("Commands: cal (calibrate), tare (zero the scale)");
+    return;
+  }
+  if (state != IDLE) {
+    Serial.println("Busy with an orange, try again when idle.");
+    return;
+  }
+
+  if (cmd == "cal") {
+    calibrate();
+  } else {
+    scale.tare(20);
+    Serial.println("Zeroed. Keep the platform empty.");
   }
 }
 
@@ -188,12 +329,23 @@ void setup() {
   servo3.write(0);
 
   scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
-  scale.set_scale(LOADCELL_CALIBRATION_FACTOR);
-  scale.tare();
+  while (!scale.wait_ready_timeout(1000)) {
+    Serial.println("HX711 not found. Check DOUT/SCK/VCC/GND wiring.");
+  }
+  loadCalibration();
 
   setupWifi();
   client.setServer(MQTT_BROKER, MQTT_PORT);
   client.setCallback(onMqttMessage);
+  reconnectMqtt();
+
+  // Zero the scale only now. The HX711 needs a moment to settle after
+  // power-up and WiFi start-up shifts its reading, so zeroing earlier
+  // leaves a false weight when the platform is empty.
+  Serial.println("Zeroing scale, keep the platform empty...");
+  mqttDelay(2000);
+  scale.tare(20);
+  Serial.println("Ready. Type 'cal' to calibrate or 'tare' to zero the scale.");
 }
 
 void loop() {
@@ -201,17 +353,21 @@ void loop() {
     reconnectMqtt();
   }
   client.loop();
+  handleSerialCommands();
 
   float weight = scale.get_units(5);
-  if (weight < 0) weight = 0;
 
   switch (state) {
     case IDLE:
+      printWeightPeriodically(weight);
       if (weight > WEIGHT_PRESENT_THRESHOLD_G) {
-        currentWeight = weight;
-        Serial.printf("Object detected, weight = %.1f g\n", currentWeight);
-        client.publish(TOPIC_DETECT, "OBJECT_DETECTED");
-        state = WAITING_FOR_RESULT;
+        float stableWeight = readStableWeight();
+        if (stableWeight > WEIGHT_PRESENT_THRESHOLD_G) {
+          currentWeight = stableWeight;
+          Serial.printf("Object detected, weight = %.1f g\n", currentWeight);
+          client.publish(TOPIC_DETECT, "OBJECT_DETECTED");
+          state = WAITING_FOR_RESULT;
+        }
       }
       break;
 
@@ -221,9 +377,11 @@ void loop() {
       break;
 
     case WAIT_OBJECT_REMOVED:
-      // Debounce: wait for the orange to leave the platform before
-      // arming detection again, so the same orange isn't counted twice.
+      // Wait for the orange to leave the platform before arming
+      // detection again, so the same orange isn't counted twice.
+      // The platform is empty at this point, so re-zero to cancel drift.
       if (weight < WEIGHT_PRESENT_THRESHOLD_G) {
+        scale.tare(10);
         Serial.println("Ready for next orange");
         state = IDLE;
       }
