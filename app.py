@@ -38,7 +38,7 @@ TOPIC_RESULT = "orangesort/result"   # Pi -> ESP32 : "DEFECTED" or "NORMAL"
 # Rotation motor relay (BCM numbering). Set RELAY_ACTIVE_HIGH = False
 # if your relay module switches ON when the pin is LOW.
 MOTOR_RELAY_PIN = 27
-RELAY_ACTIVE_HIGH = True
+RELAY_ACTIVE_HIGH = False
 
 # How long the platform motor spins to complete one rotation
 ROTATE_SECONDS = 3
@@ -79,7 +79,9 @@ GREEN = (0, 255, 0)
 # ------------------------------------------------------------------
 
 GPIO.setmode(GPIO.BCM)
-GPIO.setup(MOTOR_RELAY_PIN, GPIO.OUT)
+# Start at the OFF level so an active-low relay doesn't click on at startup.
+GPIO.setup(MOTOR_RELAY_PIN, GPIO.OUT,
+           initial=GPIO.LOW if RELAY_ACTIVE_HIGH else GPIO.HIGH)
 
 
 def motor_on():
