@@ -109,25 +109,36 @@ cd orange-defect-detection
 git pull
 ```
 
-Install dependencies into a virtual environment:
+Install dependencies into a virtual environment. GPIO comes from the
+`python3-rpi-lgpio` apt package, so nothing needs to be compiled:
 
 ```bash
 sudo apt update
-sudo apt install -y python3-venv python3-dev python3-setuptools build-essential swig
-python3 -m venv venv
+sudo apt remove -y python3-rpi.gpio
+sudo apt install -y python3-venv python3-rpi-lgpio python3-lgpio
+python3 -m venv --system-site-packages venv
 source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-(Run `source venv/bin/activate` again in every new terminal before
-running `app.py`.)
+Check that GPIO works before running the app (should print `GPIO OK`):
 
-> `requirements.txt` uses `rpi-lgpio` instead of the old `RPi.GPIO`.
-> It provides the same `import RPi.GPIO` API but also works on Raspberry
-> Pi 5 and current Raspberry Pi OS. The old `RPi.GPIO` fails there with
-> `RuntimeError: Cannot determine SOC peripheral base address`. If you
-> installed `RPi.GPIO` earlier, remove it first (the two conflict):
-> `pip uninstall -y RPi.GPIO` then `pip install -r requirements.txt`.
+```bash
+python -c "import RPi.GPIO as G; G.setmode(G.BCM); G.setup(27, G.OUT); print('GPIO OK')"
+```
+
+(Run `source venv/bin/activate` again in every new terminal before
+running `app.py`, and do not use `sudo python3 app.py` — sudo ignores
+the virtual environment.)
+
+> Why `rpi-lgpio`: it provides the same `import RPi.GPIO` API as the old
+> `RPi.GPIO` but also works on Raspberry Pi 5 and current Raspberry Pi
+> OS. The old `RPi.GPIO` fails there with
+> `RuntimeError: Cannot determine SOC peripheral base address`. The two
+> packages cannot be installed in the same Python environment, so if you
+> hit that error you still have the old one: run `pip uninstall -y
+> RPi.GPIO` inside the venv, remove the `python3-rpi.gpio` apt package,
+> or recreate the venv with the commands above (`rm -rf venv` first).
 
 Plug in the USB webcam before starting. This app uses a USB webcam only
 (the Pi Camera Module is not supported by `cv2.VideoCapture`).
