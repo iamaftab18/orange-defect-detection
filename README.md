@@ -97,13 +97,30 @@ Broker: `broker.hivemq.com`, port `1883` (plain MQTT, no login needed).
 
 ### 1. Raspberry Pi (`app.py`)
 
-Install dependencies:
+Get the code (first time only), or update it later:
+
+```bash
+# first time
+git clone https://github.com/iamaftab18/orange-defect-detection.git
+cd orange-defect-detection
+
+# later, to get the latest changes
+cd orange-defect-detection
+git pull
+```
+
+Install dependencies into a virtual environment:
 
 ```bash
 sudo apt update
-sudo apt install -y python3-opencv
-pip3 install paho-mqtt RPi.GPIO
+sudo apt install -y python3-venv python3-dev build-essential
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
 ```
+
+(Run `source venv/bin/activate` again in every new terminal before
+running `app.py`.)
 
 If you're using the Raspberry Pi Camera Module (not a USB webcam), enable
 the V4L2 compatibility layer so `cv2.VideoCapture(0)` can see it:
