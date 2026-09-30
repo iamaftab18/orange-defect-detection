@@ -1,38 +1,43 @@
-"""Relay test for the rotation motor relay (Raspberry Pi).
+"""Relay test for the rotation motor relay (wired to the ESP32).
 
-Drives the relay pin HIGH for 2 s, then LOW for 2 s, forever (Ctrl+C to stop).
-Watch the relay (click sound / LED) and note which level turns it ON:
+Sends MQTT "ON" then "OFF" to the ESP32 motor topic every 2 s, forever
+(Ctrl+C to stop). The ESP32 only spins the motor while an orange is waiting
+for inspection, so first put a weight (>5 g) on the load cell and make sure
+app.py is NOT running. (The ESP32 also has an 8 s safety cut-off.)
 
-  * relay ON while the pin is HIGH -> active HIGH -> RELAY_ACTIVE_HIGH = True
-  * relay ON while the pin is LOW  -> active LOW  -> RELAY_ACTIVE_HIGH = False
+Watch the relay (click sound / LED): it should be ON while "ON" is sent.
+If it is inverted, flip MOTOR_RELAY_ACTIVE_HIGH in esp32_code.ino.
 
-Usage:  python test.py [BCM_PIN]      (default pin 27, same as app.py)
+Usage:  python test.py
 """
 
-import sys
 import time
 
-import RPi.GPIO as GPIO
+import paho.mqtt.client as mqtt
 
-MOTOR_RELAY_PIN = int(sys.argv[1]) if len(sys.argv) > 1 else 27
+MQTT_BROKER = "broker.hivemq.com"
+MQTT_PORT = 1883
+TOPIC_MOTOR = "orangesort/motor"
 STEP_SECONDS = 2
 
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(MOTOR_RELAY_PIN, GPIO.OUT, initial=GPIO.LOW)
+client = mqtt.Client(client_id="laptop-orange-relay-test")
+client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
+client.loop_start()
 
-print(f"Testing relay on BCM GPIO {MOTOR_RELAY_PIN}. Ctrl+C to stop.")
-print("Watch the relay: which pin level turns it ON?\n")
-
+print("Testing rotation motor relay via MQTT. Ctrl+C to stop.")
 try:
     while True:
-        GPIO.output(MOTOR_RELAY_PIN, GPIO.HIGH)
-        print(f"Pin HIGH (3.3V) for {STEP_SECONDS}s  -> relay ON here = active HIGH")
+        client.publish(TOPIC_MOTOR, "ON")
+        print(f"Sent ON  - relay should be ON for {STEP_SECONDS}s")
         time.sleep(STEP_SECONDS)
 
-        GPIO.output(MOTOR_RELAY_PIN, GPIO.LOW)
-        print(f"Pin LOW  (0V)   for {STEP_SECONDS}s  -> relay ON here = active LOW")
+        client.publish(TOPIC_MOTOR, "OFF")
+        print(f"Sent OFF - relay should be OFF for {STEP_SECONDS}s")
         time.sleep(STEP_SECONDS)
 except KeyboardInterrupt:
     print("\nStopped.")
 finally:
-    GPIO.cleanup()
+    client.publish(TOPIC_MOTOR, "OFF")
+    time.sleep(0.3)
+    client.loop_stop()
+    client.disconnect()

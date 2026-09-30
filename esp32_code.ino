@@ -2,15 +2,16 @@
   Orange Defect Detection - ESP32 application.
 
   - Reads a load cell (HX711) to detect when an orange has been placed
-    on the platform, and tells the Raspberry Pi over MQTT.
-  - Waits for the Raspberry Pi to report "DEFECTED" or "NORMAL".
+    on the platform, and tells the laptop over MQTT.
+  - Runs the rotation motor relay when the laptop says so (the laptop
+    camera inspects the orange while it spins).
+  - Waits for the laptop to report "DEFECTED" or "NORMAL".
   - Moves servo1 (drop gate) 90 degrees and back, then turns on the
     conveyor relay and routes the orange using servo2 (normal + heavy)
     or servo3 (normal + light), or just the conveyor alone if defected.
   - Runs forever, one orange at a time.
 
-  Serial Monitor (115200 baud) commands:
-    cal   - guided load cell calibration (result is saved in flash)
+  Serial Monitor (115200 baud) command:
     tare  - zero the scale (platform must be empty)
 
   Required libraries (install via Arduino Library Manager):
@@ -23,7 +24,6 @@
 #include <PubSubClient.h>
 #include <HX711.h>
 #include <ESP32Servo.h>
-#include <Preferences.h>
 
 // ------------------------------------------------------------------
 // WiFi / MQTT configuration
@@ -36,8 +36,9 @@ const char *MQTT_BROKER = "broker.hivemq.com";  // HiveMQ free public broker
 const int MQTT_PORT = 1883;
 const char *MQTT_CLIENT_ID = "esp32-orange-sorter";
 
-const char *TOPIC_DETECT = "orangesort/detect";  // ESP32 -> Pi
-const char *TOPIC_RESULT = "orangesort/result";  // Pi -> ESP32
+const char *TOPIC_DETECT = "orangesort/detect";  // ESP32 -> laptop
+const char *TOPIC_MOTOR = "orangesort/motor";    // laptop -> ESP32: "ON" / "OFF"
+const char *TOPIC_RESULT = "orangesort/result";  // laptop -> ESP32: "DEFECTED" / "NORMAL"
 
 // ------------------------------------------------------------------
 // Pin configuration
@@ -47,19 +48,27 @@ const int LOADCELL_DOUT_PIN = 16;
 const int LOADCELL_SCK_PIN = 4;
 
 const int RELAY_CONVEYOR_PIN = 17;  // conveyor belt motor relay
+const int RELAY_MOTOR_PIN = 5;      // rotation motor relay (platform)
 const int SERVO1_PIN = 18;          // drop gate, right after rotation
 const int SERVO2_PIN = 19;          // normal + heavy (>100g) path
 const int SERVO3_PIN = 21;          // normal + light (<=100g) path
 
-const bool RELAY_ACTIVE_HIGH = true;  // set false if your relay turns ON on LOW
+const bool CONVEYOR_RELAY_ACTIVE_HIGH = true;  // set false if your relay turns ON on LOW
+const bool MOTOR_RELAY_ACTIVE_HIGH = false;    // rotation relay is active LOW
+
+// Safety: if the laptop never sends "OFF", stop the rotation motor anyway.
+const unsigned long MOTOR_MAX_ON_MS = 8000;
 
 // ------------------------------------------------------------------
 // Load cell settings
 // ------------------------------------------------------------------
 
-// Only used until you run the "cal" command once; after that the value
-// saved in flash is used instead.
-const float DEFAULT_CALIBRATION_FACTOR = 2280.0;
+// Calibrated on this machine with a 98 g object: with the old factor
+// -688.033 the empty platform read +0.4 g and the 98 g object read -21.5 g,
+// so the correct factor is -688.033 * (-21.9 / 98) = +153.8 (positive).
+// If a known weight reads too low/high, scale this value by
+// (shown grams / real grams); if it reads negative, flip the sign.
+const float CALIBRATION_FACTOR = 153.8;
 
 const float WEIGHT_PRESENT_THRESHOLD_G = 5.0;   // min grams = "object present"
 const float WEIGHT_HEAVY_THRESHOLD_G = 100.0;   // normal heavy vs normal light
@@ -70,7 +79,6 @@ const float WEIGHT_STABLE_TOLERANCE_G = 2.0;    // readings this close = settled
 // ------------------------------------------------------------------
 
 HX711 scale;
-Preferences prefs;
 Servo servo1, servo2, servo3;
 
 WiFiClient espClient;
@@ -84,9 +92,18 @@ float currentWeight = 0;
 // Helpers
 // ------------------------------------------------------------------
 
-void relayWrite(int pin, bool on) {
-  bool level = RELAY_ACTIVE_HIGH ? on : !on;
+void relayWrite(int pin, bool activeHigh, bool on) {
+  bool level = activeHigh ? on : !on;
   digitalWrite(pin, level ? HIGH : LOW);
+}
+
+bool motorRunning = false;
+unsigned long motorStartedAt = 0;
+
+void setMotor(bool on) {
+  relayWrite(RELAY_MOTOR_PIN, MOTOR_RELAY_ACTIVE_HIGH, on);
+  motorRunning = on;
+  if (on) motorStartedAt = millis();
 }
 
 // Like delay(), but keeps servicing the MQTT client so the connection
@@ -120,6 +137,7 @@ void reconnectMqtt() {
     if (client.connect(MQTT_CLIENT_ID)) {
       Serial.println(" connected");
       client.subscribe(TOPIC_RESULT);
+      client.subscribe(TOPIC_MOTOR);
     } else {
       Serial.print(" failed, rc=");
       Serial.print(client.state());
@@ -130,85 +148,8 @@ void reconnectMqtt() {
 }
 
 // ------------------------------------------------------------------
-// Load cell: calibration, zeroing, stable reading
+// Load cell: zeroing, stable reading
 // ------------------------------------------------------------------
-
-// Applies the calibration factor saved in flash (or the default).
-void loadCalibration() {
-  prefs.begin("scale", false);
-  float factor = prefs.getFloat("factor", 0.0);
-  prefs.end();
-
-  if (factor != 0.0) {
-    scale.set_scale(factor);
-    Serial.printf("Loaded saved calibration factor: %.2f\n", factor);
-  } else {
-    scale.set_scale(DEFAULT_CALIBRATION_FACTOR);
-    Serial.println("No saved calibration yet, using default. Type 'cal' to calibrate.");
-  }
-}
-
-void saveCalibration(float factor) {
-  prefs.begin("scale", false);
-  prefs.putFloat("factor", factor);
-  prefs.end();
-}
-
-// Waits for a line typed in the Serial Monitor, keeping MQTT alive.
-String readLine() {
-  while (!Serial.available()) {
-    client.loop();
-    delay(20);
-  }
-  String line = Serial.readStringUntil('\n');
-  line.trim();
-  return line;
-}
-
-void calibrate() {
-  Serial.println();
-  Serial.println("=== LOAD CELL CALIBRATION ===");
-  Serial.println("(Serial Monitor line ending must be set to 'Newline')");
-  Serial.println("Step 1: remove everything from the platform, then press Enter.");
-  readLine();
-
-  scale.set_scale(1.0);
-  scale.tare(20);
-  Serial.println("Zero set.");
-
-  Serial.println("Step 2: place a known weight on the platform and wait a few seconds.");
-  Serial.println("        Then type its weight in grams (e.g. 100) and press Enter.");
-  float knownGrams = readLine().toFloat();
-  if (knownGrams <= 0) {
-    Serial.println("Invalid weight, calibration cancelled.");
-    loadCalibration();
-    return;
-  }
-
-  Serial.println("Measuring...");
-  float rawChange = scale.get_value(20);  // change from zero, before scaling
-  if (fabs(rawChange) < 100) {
-    Serial.println("Almost no change detected. Is the weight on the platform and the");
-    Serial.println("load cell wired correctly? Calibration cancelled.");
-    loadCalibration();
-    return;
-  }
-
-  float factor = rawChange / knownGrams;
-  scale.set_scale(factor);
-  saveCalibration(factor);
-  Serial.printf("Calibration factor %.2f saved to flash.\n", factor);
-
-  Serial.println("Check: the weight now reads");
-  for (int i = 0; i < 3; i++) {
-    Serial.printf("  %.1f g\n", scale.get_units(5));
-  }
-
-  Serial.println("Step 3: remove the weight from the platform, then press Enter.");
-  readLine();
-  scale.tare(20);
-  Serial.println("Calibration done. Normal operation resumes.");
-}
 
 // Wait until the reading stops changing (the orange has finished
 // settling on the platform), so we don't record a half-placed weight.
@@ -241,8 +182,8 @@ void handleSerialCommands() {
   cmd.toLowerCase();
   if (cmd.length() == 0) return;
 
-  if (cmd != "cal" && cmd != "tare") {
-    Serial.println("Commands: cal (calibrate), tare (zero the scale)");
+  if (cmd != "tare") {
+    Serial.println("Commands: tare (zero the scale)");
     return;
   }
   if (state != IDLE) {
@@ -250,12 +191,8 @@ void handleSerialCommands() {
     return;
   }
 
-  if (cmd == "cal") {
-    calibrate();
-  } else {
-    scale.tare(20);
-    Serial.println("Zeroed. Keep the platform empty.");
-  }
+  scale.tare(20);
+  Serial.println("Zeroed. Keep the platform empty.");
 }
 
 // ------------------------------------------------------------------
@@ -271,7 +208,7 @@ void runServo1() {
 }
 
 void runConveyorCycle(bool defected) {
-  relayWrite(RELAY_CONVEYOR_PIN, true);  // conveyor ON
+  relayWrite(RELAY_CONVEYOR_PIN, CONVEYOR_RELAY_ACTIVE_HIGH, true);  // conveyor ON
 
   if (defected) {
     mqttDelay(5000);
@@ -285,7 +222,7 @@ void runConveyorCycle(bool defected) {
     servo3.write(0);
   }
 
-  relayWrite(RELAY_CONVEYOR_PIN, false);  // conveyor OFF
+  relayWrite(RELAY_CONVEYOR_PIN, CONVEYOR_RELAY_ACTIVE_HIGH, false);  // conveyor OFF
 }
 
 // ------------------------------------------------------------------
@@ -299,9 +236,17 @@ void onMqttMessage(char *topic, byte *payload, unsigned int length) {
   }
   Serial.printf("[%s] %s\n", topic, msg.c_str());
 
+  if (String(topic) == TOPIC_MOTOR) {
+    // Only spin while an orange is waiting for inspection.
+    setMotor(msg == "ON" && state == WAITING_FOR_RESULT);
+    return;
+  }
+
   if (String(topic) != TOPIC_RESULT || state != WAITING_FOR_RESULT) {
     return;
   }
+
+  setMotor(false);  // inspection is over
 
   bool defected = (msg == "DEFECTED");
 
@@ -318,8 +263,12 @@ void onMqttMessage(char *topic, byte *payload, unsigned int length) {
 void setup() {
   Serial.begin(115200);
 
+  // Write the OFF level before switching to OUTPUT so relays don't click on at boot.
+  relayWrite(RELAY_CONVEYOR_PIN, CONVEYOR_RELAY_ACTIVE_HIGH, false);
+  relayWrite(RELAY_MOTOR_PIN, MOTOR_RELAY_ACTIVE_HIGH, false);
   pinMode(RELAY_CONVEYOR_PIN, OUTPUT);
-  relayWrite(RELAY_CONVEYOR_PIN, false);
+  pinMode(RELAY_MOTOR_PIN, OUTPUT);
+  setMotor(false);
 
   servo1.attach(SERVO1_PIN);
   servo2.attach(SERVO2_PIN);
@@ -332,7 +281,7 @@ void setup() {
   while (!scale.wait_ready_timeout(1000)) {
     Serial.println("HX711 not found. Check DOUT/SCK/VCC/GND wiring.");
   }
-  loadCalibration();
+  scale.set_scale(CALIBRATION_FACTOR);
 
   setupWifi();
   client.setServer(MQTT_BROKER, MQTT_PORT);
@@ -345,7 +294,7 @@ void setup() {
   Serial.println("Zeroing scale, keep the platform empty...");
   mqttDelay(2000);
   scale.tare(20);
-  Serial.println("Ready. Type 'cal' to calibrate or 'tare' to zero the scale.");
+  Serial.println("Ready. Type 'tare' to zero the scale.");
 }
 
 void loop() {
@@ -354,6 +303,11 @@ void loop() {
   }
   client.loop();
   handleSerialCommands();
+
+  if (motorRunning && millis() - motorStartedAt > MOTOR_MAX_ON_MS) {
+    Serial.println("Motor timeout, stopping rotation motor.");
+    setMotor(false);
+  }
 
   float weight = scale.get_units(5);
 
@@ -373,7 +327,7 @@ void loop() {
 
     case WAITING_FOR_RESULT:
       // Nothing to do here; onMqttMessage() advances the state
-      // once the Pi publishes the DEFECTED/NORMAL result.
+      // once the laptop publishes the DEFECTED/NORMAL result.
       break;
 
     case WAIT_OBJECT_REMOVED:

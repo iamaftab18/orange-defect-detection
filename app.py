@@ -1,9 +1,9 @@
 """
-Orange Defect Detection - Raspberry Pi application.
+Orange Defect Detection - laptop application.
 
 Waits for the ESP32 to report that an orange has been placed on the
-platform (via MQTT), spins the rotation motor with a relay so the
-camera can see the whole surface of the orange, looks for big black
+platform (via MQTT), tells the ESP32 (via MQTT) to spin the rotation
+motor so the laptop camera can see the whole surface of the orange, looks for big black
 patches (defects) using simple HSV color filtering, then reports
 "DEFECTED" or "NORMAL" back to the ESP32 over MQTT.
 
@@ -20,7 +20,6 @@ import time
 
 import cv2
 import paho.mqtt.client as mqtt
-import RPi.GPIO as GPIO
 
 # ------------------------------------------------------------------
 # Configuration - change these to match your hardware / broker
@@ -29,16 +28,12 @@ import RPi.GPIO as GPIO
 # HiveMQ public broker (free, no auth needed)
 MQTT_BROKER = "broker.hivemq.com"
 MQTT_PORT = 1883
-MQTT_CLIENT_ID = "raspberrypi-orange-sorter"
+MQTT_CLIENT_ID = "laptop-orange-sorter"
 
 # MQTT topics shared with the ESP32
-TOPIC_DETECT = "orangesort/detect"   # ESP32 -> Pi : object placed on platform
-TOPIC_RESULT = "orangesort/result"   # Pi -> ESP32 : "DEFECTED" or "NORMAL"
-
-# Rotation motor relay (BCM numbering). Set RELAY_ACTIVE_HIGH = False
-# if your relay module switches ON when the pin is LOW.
-MOTOR_RELAY_PIN = 27
-RELAY_ACTIVE_HIGH = False
+TOPIC_DETECT = "orangesort/detect"   # ESP32 -> laptop : object placed on platform
+TOPIC_MOTOR = "orangesort/motor"     # laptop -> ESP32 : "ON" or "OFF" (rotation motor)
+TOPIC_RESULT = "orangesort/result"   # laptop -> ESP32 : "DEFECTED" or "NORMAL"
 
 # How long the platform motor spins to complete one rotation
 ROTATE_SECONDS = 3
@@ -46,12 +41,12 @@ ROTATE_SECONDS = 3
 # How many camera frames to check for defects while the orange rotates
 FRAME_SAMPLES = 6
 
-# USB webcam device index (0 = /dev/video0). Check `ls /dev/video*`.
+# Laptop camera index (0 = built-in webcam, 1 = first external USB camera).
 CAMERA_INDEX = 0
 CAMERA_WIDTH = 640
 CAMERA_HEIGHT = 480
 
-# --- Live video window (needs a screen: Pi desktop or VNC, not plain SSH) ---
+# --- Live video window ---
 SHOW_VIDEO = True
 WINDOW_NAME = "Orange Defect Detection (press q to quit)"
 TILE_WIDTH = 320            # width of each filter view inside the window
@@ -74,25 +69,17 @@ YELLOW = (0, 255, 255)
 RED = (0, 0, 255)
 GREEN = (0, 255, 0)
 
-# ------------------------------------------------------------------
-# GPIO setup
-# ------------------------------------------------------------------
-
-GPIO.setmode(GPIO.BCM)
-# Start at the OFF level so an active-low relay doesn't click on at startup.
-GPIO.setup(MOTOR_RELAY_PIN, GPIO.OUT,
-           initial=GPIO.LOW if RELAY_ACTIVE_HIGH else GPIO.HIGH)
+# Set by main() once the MQTT client exists; used to drive the ESP32 motor.
+mqtt_client = None
 
 
 def motor_on():
-    GPIO.output(MOTOR_RELAY_PIN, GPIO.HIGH if RELAY_ACTIVE_HIGH else GPIO.LOW)
+    mqtt_client.publish(TOPIC_MOTOR, "ON")
 
 
 def motor_off():
-    GPIO.output(MOTOR_RELAY_PIN, GPIO.LOW if RELAY_ACTIVE_HIGH else GPIO.HIGH)
+    mqtt_client.publish(TOPIC_MOTOR, "OFF")
 
-
-motor_off()
 
 # Set by the MQTT thread when the ESP32 reports an orange on the platform.
 detect_requested = threading.Event()
@@ -173,6 +160,7 @@ def build_display(frame, hsv, black_mask, big_contours, status_text, status_colo
 def on_connect(client, userdata, flags, rc):
     print(f"Connected to {MQTT_BROKER} (rc={rc})")
     client.subscribe(TOPIC_DETECT)
+    client.publish(TOPIC_MOTOR, "OFF")  # make sure the motor starts stopped
     print(f"Subscribed to '{TOPIC_DETECT}', waiting for oranges...")
 
 
@@ -189,29 +177,29 @@ def on_message(client, userdata, msg):
 # ------------------------------------------------------------------
 
 def main():
-    camera = cv2.VideoCapture(CAMERA_INDEX)
+    global mqtt_client
+
+    # CAP_DSHOW opens much faster than the default backend on Windows.
+    backend = cv2.CAP_DSHOW if os.name == "nt" else cv2.CAP_ANY
+    camera = cv2.VideoCapture(CAMERA_INDEX, backend)
     if not camera.isOpened():
-        motor_off()
-        GPIO.cleanup()
         raise SystemExit(
             f"Could not open camera index {CAMERA_INDEX}. "
-            "Check `ls /dev/video*` and set CAMERA_INDEX in app.py."
+            "Try another index (0, 1, 2...) in CAMERA_INDEX in app.py and "
+            "close other apps that use the camera."
         )
     camera.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
     camera.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
     camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
     show_video = SHOW_VIDEO
-    has_display = os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
-    if show_video and os.name == "posix" and not has_display:
-        print("No display found (running over SSH?) - video window disabled.")
-        show_video = False
 
-    # Let the USB camera's auto-exposure settle; first frames are often dark.
+    # Let the camera's auto-exposure settle; first frames are often dark.
     for _ in range(10):
         camera.read()
 
     client = mqtt.Client(client_id=MQTT_CLIENT_ID)
+    mqtt_client = client
     client.on_connect = on_connect
     client.on_message = on_message
     client.connect_async(MQTT_BROKER, MQTT_PORT, keepalive=60)
@@ -297,11 +285,12 @@ def main():
     except KeyboardInterrupt:
         print("Stopping...")
     finally:
-        motor_off()
+        if client.is_connected():
+            motor_off()
+            time.sleep(0.2)  # let the OFF message go out before disconnecting
         client.loop_stop()
         client.disconnect()
         camera.release()
-        GPIO.cleanup()
         if show_video:
             cv2.destroyAllWindows()
 
